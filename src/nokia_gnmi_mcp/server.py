@@ -35,8 +35,13 @@ from mcp.types import Tool, TextContent
 
 from pygnmi.client import gNMIclient
 
-logging.basicConfig(level=logging.INFO)
+import sys
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("nokia-gnmi-mcp")
+
+# Suppress pygnmi INFO/DEBUG logs to avoid polluting MCP stdout stream
+logging.getLogger("pygnmi").setLevel(logging.WARNING)
+logging.getLogger("pygnmi.client").setLevel(logging.WARNING)
 
 # ═══════════════════════════════════════════════
 # Device session management

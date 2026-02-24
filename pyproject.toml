@@ -1,0 +1,16 @@
+[project]
+name = "nokia-gnmi-mcp"
+version = "1.0.0"
+description = "MCP server for Nokia SR OS gNMI management"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "pygnmi>=0.8.14",
+]
+
+[project.scripts]
+nokia-gnmi-mcp = "nokia_gnmi_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

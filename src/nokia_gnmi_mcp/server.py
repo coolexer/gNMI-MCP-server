@@ -342,8 +342,8 @@ TOOLS = [
                 "port": {"type": "integer", "description": "gNMI port (default: 57400)", "default": 57400},
                 "username": {"type": "string", "description": "gRPC/gNMI username"},
                 "password": {"type": "string", "description": "gRPC/gNMI password"},
-                "skip_verify": {"type": "boolean", "description": "Skip TLS certificate verification (default: true)", "default": True},
-                "insecure": {"type": "boolean", "description": "Use insecure (non-TLS) connection (default: false)", "default": False},
+                "skip_verify": {"type": "boolean", "description": "Skip TLS cert verification. For real hardware with self-signed cert. For srsim use insecure=true. (default: true)", "default": True},
+                "insecure": {"type": "boolean", "description": "Use insecure plain gRPC (no TLS). Required for Nokia srsim/containerlab labs. (default: false)", "default": False},
                 "timeout": {"type": "integer", "description": "Connection timeout in seconds (default: 10)", "default": 10},
             },
             "required": ["name", "host", "username", "password"],
@@ -551,29 +551,53 @@ def handle_tool(tool_name: str, args: dict) -> str:
         name = args["name"]
         if name in _sessions:
             _close(name)
+
+        host = args["host"]
+        port = args.get("port", 57400)
+        user = args["username"]
+        pwd  = args["password"]
+        timeout = args.get("timeout", 10)
+        insecure = args.get("insecure", False)
+        skip_verify = args.get("skip_verify", True)
+
+        # Auto-fallback: if neither insecure nor explicit TLS cert provided,
+        # try skip_verify first; if SSL error → retry with insecure=True
+        # (Nokia srsim/containerlab uses plain gRPC without TLS)
+        tried_insecure = insecure
+
         _sessions[name] = DeviceSession(
-            host=args["host"],
-            port=args.get("port", 57400),
-            username=args["username"],
-            password=args["password"],
-            skip_verify=args.get("skip_verify", True),
-            insecure=args.get("insecure", False),
-            timeout=args.get("timeout", 10),
+            host=host, port=port, username=user, password=pwd,
+            skip_verify=skip_verify, insecure=insecure, timeout=timeout,
         )
-        gc = _connect(name)
         try:
+            gc = _connect(name)
             caps = gc.capabilities()
-            model_count = len(caps.get("supported_models", []))
-            encodings = caps.get("supported_encodings", [])
-            gnmi_ver = caps.get("gnmi_version", "unknown")
-            return (
-                f"✓ gNMI connected to '{name}' ({args['host']}:{args.get('port', 57400)})\n"
-                f"  gNMI version: {gnmi_ver}\n"
-                f"  Supported encodings: {', '.join(encodings)}\n"
-                f"  YANG models: {model_count}"
-            )
-        except Exception:
-            return f"✓ gNMI connected to '{name}' ({args['host']}:{args.get('port', 57400)})"
+        except Exception as e:
+            err_str = str(e).lower()
+            if not tried_insecure and ("ssl" in err_str or "certificate" in err_str or "tls" in err_str):
+                # Fallback to insecure (plain gRPC) — typical for srsim
+                logger.info(f"TLS failed for '{name}', retrying with insecure=True")
+                _close(name)
+                _sessions[name] = DeviceSession(
+                    host=host, port=port, username=user, password=pwd,
+                    skip_verify=False, insecure=True, timeout=timeout,
+                )
+                gc = _connect(name)
+                caps = gc.capabilities()
+                tried_insecure = True
+            else:
+                raise
+
+        model_count = len(caps.get("supported_models", []))
+        encodings = caps.get("supported_encodings", [])
+        gnmi_ver = caps.get("gnmi_version", "unknown")
+        tls_mode = "insecure (plain gRPC)" if _sessions[name].insecure else ("skip_verify" if skip_verify else "TLS")
+        return (
+            f"✓ gNMI connected to '{name}' ({host}:{port}) [{tls_mode}]\n"
+            f"  gNMI version: {gnmi_ver}\n"
+            f"  Supported encodings: {', '.join(encodings)}\n"
+            f"  YANG models: {model_count}"
+        )
 
     elif tool_name == "sros_disconnect":
         return _close(args["name"])

@@ -57,22 +57,141 @@ logger = logging.getLogger("nokia-gnmi-mcp")
 # ═══════════════════════════════════════════════
 # YANG path cache
 # ═══════════════════════════════════════════════
-
-# Ожидаемая структура:
-#   <project_root>/yang/sros-25.10/YANG/nokia-combined/nokia-conf.yang
-#   <project_root>/yang/sros-25.10/YANG/nokia-combined/nokia-state.yang
-#   <project_root>/yang/sros-25.10/YANG/nokia-submodule/*.yang
-#   <project_root>/yang/cache/configure-paths.txt  (auto-generated)
-#   <project_root>/yang/cache/state-paths.txt       (auto-generated)
+#
+# Универсальный поиск YANG файлов:
+#   Сканирует yang/**/ рекурсивно, ищет nokia-submodule/ с нужными файлами.
+#   Не привязан к конкретной версии (sros-25.10 и т.д.).
+#
+# Структура (пример):
+#   yang/sros-25.10/YANG/nokia-submodule/nokia-conf-*.yang
+#   yang/sros-25.10/YANG/nokia-submodule/nokia-state-*.yang
+#   yang/cache/configure-paths.txt  (auto-generated)
+#   yang/cache/state-paths.txt       (auto-generated)
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-_YANG_DIR = _PROJECT_ROOT / "yang" / "sros-25.10" / "YANG"
 _CACHE_DIR = _PROJECT_ROOT / "yang" / "cache"
 _yang_cache: dict[str, list[str]] = {}
 
+# Маппинг суффикса имени файла → базовый gNMI путь
+# nokia-conf-router-bgp → /configure/router[router-name]
+_ROUTER_PREFIXES = (
+    "router-", "router",
+)
+_SERVICE_PREFIXES = (
+    "service-", "service",
+)
+_SYSTEM_PREFIXES = (
+    "system-", "system",
+)
+
+
+def _find_submodule_dir(tree: str) -> Optional[Path]:
+    """
+    Автоматически найти директорию с YANG submodule файлами.
+    Ищет yang/**/nokia-submodule/ с нужными файлами.
+    """
+    yang_base = _PROJECT_ROOT / "yang"
+    if not yang_base.exists():
+        return None
+    pattern = "nokia-conf-*.yang" if tree == "configure" else "nokia-state-*.yang"
+    for submod_dir in yang_base.rglob("nokia-submodule"):
+        if submod_dir.is_dir() and list(submod_dir.glob(pattern)):
+            return submod_dir
+    return None
+
+
+def _get_root_prefix(filename_stem: str, tree: str) -> str:
+    """
+    Вывести gNMI root prefix из имени YANG файла.
+    nokia-conf-router-bgp  → /configure/router[router-name]
+    nokia-conf-system      → /configure/system
+    nokia-conf-service-vpls → /configure/service
+    nokia-conf-port        → /configure
+    """
+    base = "/configure" if tree == "configure" else "/state"
+    file_prefix = "nokia-conf-" if tree == "configure" else "nokia-state-"
+    rel = filename_stem.removeprefix(file_prefix)  # "router-bgp", "system", "port", ...
+
+    if rel == "router" or rel.startswith("router-"):
+        return base + "/router[router-name]"
+    elif rel == "service" or rel.startswith("service-"):
+        return base + "/service"
+    elif rel == "system" or rel.startswith("system-"):
+        return base + "/system"
+    else:
+        return base
+
+
+def _extract_paths_from_file(yang_file: Path, root_prefix: str, paths: set):
+    """
+    Парсит Nokia YANG submodule файл, строит иерархические gNMI пути.
+    Nokia YANG использует синтаксис без кавычек: container bgp {
+    Ключи списков берутся из statement 'key'.
+    """
+    content = yang_file.read_text(encoding="utf-8", errors="ignore")
+    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+    content = re.sub(r'//[^\n]*', '', content)
+
+    stack = []  # [indent, name, is_list]
+
+    for line in content.split('\n'):
+        mc = re.match(r'^(\s*)container\s+([a-z][a-z0-9-]*)\s*\{', line)
+        ml = re.match(r'^(\s*)list\s+([a-z][a-z0-9-]*)\s*\{', line)
+        mk = re.match(r'^(\s*)key\s+"([^"]+)"', line)
+        if not mk:
+            mk = re.match(r'^(\s*)key\s+([a-z][a-z0-9-]*)\s*;', line)
+
+        if mc or ml:
+            is_list = bool(ml)
+            m = ml or mc
+            indent = len(m.group(1))
+            name = m.group(2)
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append([indent, name, is_list])
+            path = root_prefix + "/" + "/".join(s[1] for s in stack)
+            # Убрать дублирование если top-level container == последний сегмент root
+            if path != root_prefix:
+                paths.add(path)
+
+        elif mk and stack and stack[-1][2]:
+            key = mk.group(2).split()[0]
+            old = stack[-1]
+            # Удалить путь без ключа
+            unkeyed = root_prefix + "/" + "/".join(s[1] for s in stack)
+            paths.discard(unkeyed)
+            # Добавить путь с ключом
+            stack[-1] = [old[0], f"{old[1]}[{key}]", False]
+            paths.add(root_prefix + "/" + "/".join(s[1] for s in stack))
+
+
+def _build_paths_from_yang(tree: str) -> list[str]:
+    """
+    Строит список gNMI путей из Nokia YANG submodule файлов.
+    Автоматически находит директорию с файлами.
+    """
+    submod_dir = _find_submodule_dir(tree)
+    if not submod_dir:
+        logger.warning(f"Nokia YANG submodule dir not found under {_PROJECT_ROOT / 'yang'}")
+        return []
+
+    pattern = "nokia-conf-*.yang" if tree == "configure" else "nokia-state-*.yang"
+    yang_files = sorted(submod_dir.glob(pattern))
+    logger.info(f"Building YANG cache from {len(yang_files)} files in {submod_dir}")
+
+    paths: set = set()
+    for yang_file in yang_files:
+        try:
+            root = _get_root_prefix(yang_file.stem, tree)
+            _extract_paths_from_file(yang_file, root, paths)
+        except Exception as e:
+            logger.debug(f"Error parsing {yang_file.name}: {e}")
+
+    return sorted(paths)
+
 
 def _load_yang_cache(tree: str) -> list[str]:
-    """Load paths from cache file. Returns empty list if not available."""
+    """Load paths from cache file, or build from YANG files if not cached."""
     global _yang_cache
     if tree in _yang_cache:
         return _yang_cache[tree]
@@ -84,70 +203,13 @@ def _load_yang_cache(tree: str) -> list[str]:
         logger.info(f"YANG cache loaded: {tree} ({len(paths)} paths)")
         return paths
 
-    # Try to build cache from YANG files
     paths = _build_paths_from_yang(tree)
     if paths:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_file.write_text("\n".join(paths), encoding="utf-8")
         _yang_cache[tree] = paths
-        logger.info(f"YANG cache built: {tree} ({len(paths)} paths)")
+        logger.info(f"YANG cache built and saved: {tree} ({len(paths)} paths)")
     return paths
-
-
-def _build_paths_from_yang(tree: str) -> list[str]:
-    """
-    Parse Nokia YANG submodules and extract all container/list/leaf paths.
-    Pure Python — no pyang or gnmic needed.
-    """
-    submod_dir = _YANG_DIR / "nokia-submodule"
-    if not submod_dir.exists():
-        logger.warning(f"YANG submodule dir not found: {submod_dir}")
-        return []
-
-    prefix = "/" + tree.replace("configure", "configure").replace("state", "state")
-    # Find relevant submodule files
-    if tree == "configure":
-        pattern = "nokia-conf-*.yang"
-    else:
-        pattern = "nokia-state-*.yang"
-
-    yang_files = list(submod_dir.glob(pattern))
-    if not yang_files:
-        logger.warning(f"No YANG files found matching {pattern} in {submod_dir}")
-        return []
-
-    paths = set()
-    for yang_file in yang_files:
-        try:
-            _extract_paths_from_file(yang_file, paths)
-        except Exception as e:
-            logger.debug(f"Error parsing {yang_file.name}: {e}")
-
-    return sorted(paths)
-
-
-def _extract_paths_from_file(yang_file: Path, paths: set):
-    """Extract meaningful path fragments from a YANG file using regex."""
-    content = yang_file.read_text(encoding="utf-8", errors="ignore")
-
-    # Remove comments
-    content = re.sub(r'//[^\n]*', '', content)
-    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-
-    # Find augment statements — these give us full paths
-    augment_paths = re.findall(r'augment\s+"(/[^"]+)"', content)
-    for ap in augment_paths:
-        # Clean up YANG module prefixes like sros-conf:
-        clean = re.sub(r'\b\w+-(?:conf|state):', '', ap)
-        paths.add(clean)
-
-    # Find container/list names within augments to build sub-paths
-    # This gives us the full tree structure
-    blocks = re.findall(
-        r'(?:container|list|leaf|leaf-list)\s+"([a-z][a-z0-9-]*)"',
-        content
-    )
-    # We'll skip deep parsing here — augment paths are sufficient for search
 
 
 def yang_search(keyword: str, tree: str = "configure", max_results: int = 50) -> str:

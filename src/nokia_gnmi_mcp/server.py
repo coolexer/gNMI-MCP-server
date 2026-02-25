@@ -25,14 +25,33 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+import sys
+
+# ── КРИТИЧНО: stdout зарезервирован для MCP JSON-транспорта ──
+# Все логи должны идти ТОЛЬКО в stderr, иначе MCP парсер ломается.
+# Делаем это ДО импорта pygnmi, чтобы перехватить его handlers.
+
+# 1. Принудительно переводим root logger на stderr
+_stderr_handler = logging.StreamHandler(sys.stderr)
+_stderr_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+
+_root_logger = logging.getLogger()
+_root_logger.handlers.clear()
+_root_logger.addHandler(_stderr_handler)
+_root_logger.setLevel(logging.INFO)
+
+# 2. Теперь импортируем pygnmi (он может добавить свои handlers, но stdout уже не тронет)
 from pygnmi.client import gNMIclient
 
-import sys
-logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-logger = logging.getLogger("nokia-gnmi-mcp")
+# 3. После импорта — снова чистим handlers (pygnmi мог добавить свои)
+for _name in ("pygnmi", "pygnmi.client", "grpc"):
+    _lg = logging.getLogger(_name)
+    _lg.handlers.clear()
+    _lg.addHandler(_stderr_handler)
+    _lg.setLevel(logging.WARNING)
+    _lg.propagate = False
 
-logging.getLogger("pygnmi").setLevel(logging.WARNING)
-logging.getLogger("pygnmi.client").setLevel(logging.WARNING)
+logger = logging.getLogger("nokia-gnmi-mcp")
 
 
 # ═══════════════════════════════════════════════

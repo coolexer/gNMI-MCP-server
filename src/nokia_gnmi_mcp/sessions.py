@@ -59,7 +59,7 @@ class SessionManager:
 
     def get_client(self, name: str) -> Any:
         if name not in self.sessions:
-            raise ValueError(f"Device '{name}' not registered. Use 'sros_connect' tool first.")
+            raise ValueError(f"Device '{name}' not registered. Use 'gnmi_connect' tool first.")
         if name not in self.connections:
             return self._connect(name)
         return self.connections[name]

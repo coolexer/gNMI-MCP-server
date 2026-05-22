@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from nokia_gnmi_mcp.models import DeviceSession
 from nokia_gnmi_mcp.sessions import SessionManager
 
@@ -59,3 +61,10 @@ def test_session_manager_lists_and_disconnects_sessions():
     assert "pe1" in manager.list_sessions()
     assert manager.disconnect("pe1") == "Session 'pe1' closed."
     assert manager.list_sessions() == "No active sessions."
+
+
+def test_missing_session_error_points_to_generic_connect_tool():
+    manager = SessionManager(client_factory=FakeGNMIClient)
+
+    with pytest.raises(ValueError, match="gnmi_connect"):
+        manager.get_client("missing")

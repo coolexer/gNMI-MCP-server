@@ -27,7 +27,8 @@
 ### Task 3: FastMCP Server
 
 - [x] Replace manual `mcp.server.Server` schema/dispatch with decorated FastMCP tool functions.
-- [x] Keep tool names: `sros_connect`, `sros_disconnect`, `sros_get_config`, `sros_get_state`, `sros_set_update`, `sros_set_replace`, `sros_set_delete`, `sros_cli_command`, `sros_capabilities`, `sros_list_sessions`, `yang_search`.
+- [x] Keep initial tool names: `sros_connect`, `sros_disconnect`, `sros_get_config`, `sros_get_state`, `sros_set_update`, `sros_set_replace`, `sros_set_delete`, `sros_cli_command`, `sros_capabilities`, `sros_list_sessions`, `yang_search`.
+- [x] Add vendor-neutral `gnmi_*` tool names as the primary API and retain `sros_*` as legacy aliases.
 - [x] Ensure all logs go to stderr and stdout remains MCP-safe.
 
 ### Task 4: Docs And Validation

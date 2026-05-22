@@ -1,7 +1,7 @@
 [project]
 name = "nokia-gnmi-mcp"
 version = "1.1.0"
-description = "FastMCP server for Nokia SR OS gNMI operations"
+description = "FastMCP server for generic gNMI operations with Nokia-friendly defaults"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}

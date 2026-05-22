@@ -1,13 +1,11 @@
 {
   "mcpServers": {
-    "nokia-gnmi": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "C:\\Users\\YourUser\\path\\to\\nokia-gnmi-mcp",
-        "run",
-        "nokia-gnmi-mcp"
-      ]
+    "nokia-yang-mcp": {
+      "command": "nokia-yang",
+      "args": ["serve"]
+    },
+    "nokia-gnmi-mcp": {
+      "command": "nokia-gnmi-mcp"
     }
   }
 }

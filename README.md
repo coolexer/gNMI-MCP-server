@@ -13,6 +13,8 @@ uv sync --python 3.13
 uv run nokia-gnmi-mcp
 ```
 
+To install the command independently of the checkout, run `uv tool install --python 3.13 .`.
+
 For Codex, configure `~/.codex/config.toml` with an absolute path to the environment executable:
 
 ```toml
@@ -24,6 +26,10 @@ args = []
 Restart Codex after changing the configuration. A typical first call is `sros_connect` with a session name, host, username, and password. Credentials are kept in process memory for that session; they are never written to the configuration file.
 
 TLS certificate verification is enabled by default. For a lab with a self-signed certificate, explicitly set `skip_verify=true`; for a plaintext lab endpoint, explicitly set `insecure=true`. The server never retries a failed TLS connection over plaintext.
+
+## Nokia YANG workflow
+
+For reliable SR OS paths, use [nokia-yang-mcp](https://github.com/coolexer/nokia-yang-mcp) to find and check a path for the target platform. Then connect with `sros_connect`, read the current value with `sros_get_config` or `sros_get_state`, and pass the checked path to a Set tool if a change is needed. `yang_search` below is a local fallback for discovery when that separate server is unavailable.
 
 ## Tools
 

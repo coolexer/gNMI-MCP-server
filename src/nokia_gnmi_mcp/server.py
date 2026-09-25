@@ -232,12 +232,14 @@ def yang_search(keyword: str, tree: str = "configure", max_results: int = 50) ->
     tree = tree.lower().strip()
     if tree not in ("configure", "state"):
         tree = "configure"
+    max_results = max(1, min(max_results, 200))
 
     paths = _load_yang_cache(tree)
 
     if not paths:
         return (
             f"YANG cache not available for '{tree}'.\n\n"
+            "For Nokia path discovery and validation, use nokia-yang-mcp.\n\n"
             f"To enable YANG search, place Nokia YANG models at:\n"
             f"  {_YANG_DIR}\n\n"
             f"Expected structure:\n"

@@ -3,6 +3,7 @@ name = "nokia-gnmi-mcp"
 version = "2.0.0"
 description = "MCP server for Nokia SR OS gNMI management"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=2,<3",

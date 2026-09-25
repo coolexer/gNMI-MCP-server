@@ -1,140 +1,55 @@
-# Nokia SR OS gNMI MCP Server
+# Nokia SR OS gNMI MCP server
 
-MCP server for managing Nokia SR OS devices via gNMI (gRPC) from Claude Desktop.
+A local stdio MCP server for Nokia SR OS gNMI. It exposes configuration and state reads, configuration update/replace/delete, capabilities, device sessions, and optional YANG path search.
 
-## Features
+## Requirements
 
-- **gNMI Get** — retrieve configuration and operational state with YANG paths
-- **gNMI Set** — update, replace, or delete configuration
-- **MD-CLI commands** — via Nokia gNMI CLI extension
-- **gNMI Capabilities** — discover supported models and encodings
-- **Runtime credentials** — no passwords in config files
-- **Multi-device** — manage multiple SR OS devices simultaneously
-- **JSON output** — clean json_ietf encoding (easier to read than XML)
+Python 3.11 or newer and a gNMI-enabled Nokia SR OS device. The server uses the official MCP Python SDK 2.x and pyGNMI. MCP 2.x serves both current and older MCP clients over stdio.
 
-## Installation
+## Install
 
-```bash
-cd nokia-gnmi-mcp
-
-# Option A: uv (recommended)
-uv sync
-
-# Option B: pip
-pip install -e .
+```powershell
+uv sync --python 3.13
+uv run nokia-gnmi-mcp
 ```
 
-## Claude Desktop Configuration
+To install the command independently of the checkout, run `uv tool install --python 3.13 .`.
 
-Edit `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+For Codex, configure `~/.codex/config.toml` with an absolute path to the environment executable:
 
-```json
-{
-  "mcpServers": {
-    "nokia-gnmi": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "C:\\Users\\YourUser\\nokia-gnmi-mcp",
-        "run",
-        "nokia-gnmi-mcp"
-      ]
-    }
-  }
-}
+```toml
+[mcp_servers.nokia-gnmi-mcp]
+command = 'C:\path\to\gNMI-MCP-server\.venv\Scripts\nokia-gnmi-mcp.exe'
+args = []
 ```
 
-## Usage
+Restart Codex after changing the configuration. A typical first call is `sros_connect` with a session name, host, username, and password. Credentials are kept in process memory for that session; they are never written to the configuration file.
 
-### 1. Connect to a device
+TLS certificate verification is enabled by default. For a lab with a self-signed certificate, explicitly set `skip_verify=true`; for a plaintext lab endpoint, explicitly set `insecure=true`. The server never retries a failed TLS connection over plaintext.
 
-> "Connect to my SR OS router at 192.168.1.1 via gNMI, username admin, password Nokia123, call it pe1"
+## Nokia YANG workflow
 
-### 2. Get configuration
+For reliable SR OS paths, use [nokia-yang-mcp](https://github.com/coolexer/nokia-yang-mcp) to find and check a path for the target platform. Then connect with `sros_connect`, read the current value with `sros_get_config` or `sros_get_state`, and pass the checked path to a Set tool if a change is needed. `yang_search` below is a local fallback for discovery when that separate server is unavailable.
 
-> "Show me the router interfaces config on pe1"
+## Tools
 
-Claude uses path: `/configure/router[router-name=Base]/interface`
+| Tool | Purpose |
+| --- | --- |
+| `sros_connect` / `sros_disconnect` | Open or close a named gNMI session |
+| `sros_get_config` / `sros_get_state` | Read YANG paths with JSON IETF encoding |
+| `sros_set_update` / `sros_set_replace` / `sros_set_delete` | Change configuration; replace removes unspecified nodes in its subtree |
+| `sros_capabilities` | Read gNMI version, encodings, and model summary |
+| `sros_list_sessions` | Show in-memory sessions without passwords |
+| `yang_search` | Search local Nokia YANG paths |
 
-### 3. Get operational state
+`yang_search` requires Nokia YANG submodule files under a `yang` directory. Set `NOKIA_GNMI_YANG_DIR` to the absolute path of that directory. The server creates `cache/configure-paths.txt` and `cache/state-paths.txt` within it. You can also place prebuilt files there, one path per line. The directory must be writable to build the cache.
 
-> "What's the BGP neighbor state on pe1?"
+The previous `sros_cli_command` tool was removed: pyGNMI's `get()` does not accept the vendor extension argument used by that tool. Use gNMI paths for reads or a separate CLI transport for MD-CLI commands.
 
-Claude uses path: `/state/router[router-name=Base]/bgp/neighbor`
+## Check
 
-### 4. Update configuration
-
-> "Create a loopback lo5 with IP 10.10.10.5/32 on pe1"
-
-Claude uses gNMI Set update.
-
-### 5. Delete configuration
-
-> "Remove interface test from pe1"
-
-Claude uses gNMI Set delete.
-
-## Tools Reference
-
-| Tool | gNMI Op | Description |
-|------|---------|-------------|
-| `sros_connect` | — | Connect to device (host, port, credentials, TLS options) |
-| `sros_disconnect` | — | Close gNMI session |
-| `sros_get_config` | Get (CONFIG) | Retrieve configuration by YANG path |
-| `sros_get_state` | Get (STATE) | Retrieve operational state by YANG path |
-| `sros_set_update` | Set (update) | Merge configuration changes |
-| `sros_set_replace` | Set (replace) | Replace configuration subtree |
-| `sros_set_delete` | Set (delete) | Delete configuration elements |
-| `sros_cli_command` | CLI ext | MD-CLI show commands via gNMI |
-| `sros_capabilities` | Capabilities | List supported models and encodings |
-| `sros_list_sessions` | — | List active sessions |
-
-## Nokia YANG Path Reference
-
-### Configuration paths (`/configure/...`)
-
-```
-/configure/router[router-name=Base]/interface
-/configure/router[router-name=Base]/bgp
-/configure/router[router-name=Base]/isis[isis-instance=0]
-/configure/port[port-id=1/1/c2/1]
-/configure/card[slot-number=1]
-/configure/service/vprn[service-name=CUST-1]
-/configure/service/vpls[service-name=L2-1]
-/configure/system
+```powershell
+uv run python -m unittest discover -s tests -v
 ```
 
-### State paths (`/state/...`)
-
-```
-/state/router[router-name=Base]/interface[interface-name=to-pe2]
-/state/router[router-name=Base]/bgp/neighbor
-/state/port[port-id=1/1/c2/1]
-/state/card[slot-number=1]
-/state/system/information
-```
-
-## Differences from NETCONF MCP
-
-| Feature | NETCONF MCP | gNMI MCP |
-|---------|-------------|----------|
-| Protocol | NETCONF/SSH | gRPC/HTTP2 |
-| Port | 830 | 57400 |
-| Encoding | XML | JSON (json_ietf) |
-| Candidate datastore | Yes (commit/rollback) | No (direct apply) |
-| Output readability | XML verbose | JSON clean |
-| Streaming telemetry | No | Possible (future) |
-
-## Troubleshooting
-
-**Connection refused**: Ensure gRPC is enabled on SR OS:
-```
-configure system grpc admin-state enable
-configure system grpc allow-unsecure-connection
-configure system grpc gnmi admin-state enable
-configure system grpc gnmi auto-config-save true
-```
-
-**TLS errors**: Use `skip_verify=true` for lab or `insecure=true` for non-TLS connections.
-
-**Timeout**: Increase timeout in `sros_connect`. Large state queries may need more time.
+The test suite checks MCP tool discovery, argument validation, and that a TLS failure never triggers a plaintext retry. Device operations require a live Nokia endpoint and are not exercised by the local tests.

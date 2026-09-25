@@ -16,14 +16,19 @@ Features:
 
 import json
 import logging
+import os
 import re
+from jsonschema import ValidationError, validate
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import (
+    CallToolRequestParams, CallToolResult, ListToolsResult,
+    PaginatedRequestParams, TextContent, Tool,
+)
 
 import sys
 
@@ -68,8 +73,8 @@ logger = logging.getLogger("nokia-gnmi-mcp")
 #   yang/cache/configure-paths.txt  (auto-generated)
 #   yang/cache/state-paths.txt       (auto-generated)
 
-_PROJECT_ROOT = Path(__file__).parent.parent.parent
-_CACHE_DIR = _PROJECT_ROOT / "yang" / "cache"
+_YANG_DIR = Path(os.environ.get("NOKIA_GNMI_YANG_DIR", Path(__file__).resolve().parents[2] / "yang"))
+_CACHE_DIR = _YANG_DIR / "cache"
 _yang_cache: dict[str, list[str]] = {}
 
 # Маппинг суффикса имени файла → базовый gNMI путь
@@ -90,7 +95,7 @@ def _find_submodule_dir(tree: str) -> Optional[Path]:
     Автоматически найти директорию с YANG submodule файлами.
     Ищет yang/**/nokia-submodule/ с нужными файлами.
     """
-    yang_base = _PROJECT_ROOT / "yang"
+    yang_base = _YANG_DIR
     if not yang_base.exists():
         return None
     pattern = "nokia-conf-*.yang" if tree == "configure" else "nokia-state-*.yang"
@@ -172,7 +177,7 @@ def _build_paths_from_yang(tree: str) -> list[str]:
     """
     submod_dir = _find_submodule_dir(tree)
     if not submod_dir:
-        logger.warning(f"Nokia YANG submodule dir not found under {_PROJECT_ROOT / 'yang'}")
+        logger.warning("Nokia YANG submodule dir not found under %s", _YANG_DIR)
         return []
 
     pattern = "nokia-conf-*.yang" if tree == "configure" else "nokia-state-*.yang"
@@ -227,12 +232,14 @@ def yang_search(keyword: str, tree: str = "configure", max_results: int = 50) ->
     tree = tree.lower().strip()
     if tree not in ("configure", "state"):
         tree = "configure"
+    max_results = max(1, min(max_results, 200))
 
     paths = _load_yang_cache(tree)
 
     if not paths:
         return (
             f"YANG cache not available for '{tree}'.\n\n"
+            "For Nokia path discovery and validation, use nokia-yang-mcp.\n\n"
             f"To enable YANG search, place Nokia YANG models at:\n"
             f"  {_YANG_DIR}\n\n"
             f"Expected structure:\n"
@@ -272,7 +279,7 @@ class DeviceSession:
     port: int = 57400
     username: str = "admin"
     password: str = "admin"
-    skip_verify: bool = True
+    skip_verify: bool = False
     insecure: bool = False
     timeout: int = 10
 
@@ -294,9 +301,13 @@ def _connect(name: str) -> gNMIclient:
         password=s.password,
         skip_verify=s.skip_verify,
         insecure=s.insecure,
-        timeout=s.timeout,
+        gnmi_timeout=s.timeout,
     )
-    gc.connect()
+    try:
+        gc.connect()
+    except Exception:
+        gc.close()
+        raise
     _connections[name] = gc
     logger.info(f"gNMI connected to '{name}'")
     return gc
@@ -348,21 +359,6 @@ def _do_set_delete(gc: gNMIclient, paths: list[str]) -> str:
     return _json_pretty(result)
 
 
-def _do_cli_command(gc: gNMIclient, command: str) -> str:
-    try:
-        result = gc.get(path=["/"], datatype="config", encoding="ascii")
-        return _json_pretty(result)
-    except Exception:
-        pass
-    try:
-        from pygnmi.spec.v080.gnmi_ext_pb2 import Extension, RegisteredExtension
-        ext = Extension(registered_ext=RegisteredExtension(id=1001, msg=command.encode()))
-        result = gc.get(path=["/"], encoding="ascii", extension=[ext])
-        return _json_pretty(result)
-    except Exception as e:
-        return f"CLI via gNMI extension failed: {e}. Use gNMI native paths instead."
-
-
 def _do_capabilities(gc: gNMIclient) -> str:
     result = gc.capabilities()
     output = {}
@@ -394,19 +390,19 @@ TOOLS = [
         description=(
             "Connect to a Nokia SR OS device via gNMI (gRPC). "
             "Registers a named session with credentials for subsequent operations. "
-            "Default port is 57400. Uses skip_verify=true for lab environments."
+            "Default port is 57400. TLS certificate verification is enabled by default."
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Session name (e.g. 'pe1', 'core-rtr')"},
                 "host": {"type": "string", "description": "IP address or hostname of the SR OS device"},
-                "port": {"type": "integer", "description": "gNMI port (default: 57400)", "default": 57400},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "gNMI port (default: 57400)", "default": 57400},
                 "username": {"type": "string", "description": "gRPC/gNMI username"},
                 "password": {"type": "string", "description": "gRPC/gNMI password"},
-                "skip_verify": {"type": "boolean", "description": "Skip TLS cert verification. For real hardware with self-signed cert. For srsim use insecure=true. (default: true)", "default": True},
+                "skip_verify": {"type": "boolean", "description": "Skip TLS cert verification for labs only (default: false)", "default": False},
                 "insecure": {"type": "boolean", "description": "Use insecure plain gRPC (no TLS). Required for Nokia srsim/containerlab labs. (default: false)", "default": False},
-                "timeout": {"type": "integer", "description": "Connection timeout in seconds (default: 10)", "default": 10},
+                "timeout": {"type": "integer", "minimum": 1, "description": "Connection timeout in seconds (default: 10)", "default": 10},
             },
             "required": ["name", "host", "username", "password"],
         },
@@ -414,7 +410,7 @@ TOOLS = [
     Tool(
         name="sros_disconnect",
         description="Close a gNMI session to a Nokia SR OS device.",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {"name": {"type": "string", "description": "Session name to disconnect"}},
             "required": ["name"],
@@ -433,7 +429,7 @@ TOOLS = [
             "  /configure/card[slot-number=1]\n"
             "  /configure (entire config)"
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Device session name"},
@@ -458,7 +454,7 @@ TOOLS = [
             "  /state/card[slot-number=1]\n"
             "  /state/system/information"
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Device session name"},
@@ -483,7 +479,7 @@ TOOLS = [
             "  path: /configure/port[port-id=1/1/c2/1]\n"
             '  value: {"admin-state": "enable"}'
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Device session name"},
@@ -500,7 +496,7 @@ TOOLS = [
             "Replaces the entire subtree at the given path with the provided value. "
             "WARNING: This removes any existing config under the path that is not in the new value."
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Device session name"},
@@ -518,7 +514,7 @@ TOOLS = [
             "Example:\n"
             "  paths: ['/configure/router[router-name=Base]/interface[interface-name=test]']"
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Device session name"},
@@ -532,29 +528,12 @@ TOOLS = [
         },
     ),
     Tool(
-        name="sros_cli_command",
-        description=(
-            "Execute an MD-CLI show command on Nokia SR OS via gNMI CLI extension. "
-            "Note: CLI via gNMI may not be supported on all platforms/versions. "
-            "Prefer gNMI native paths (sros_get_config/sros_get_state) when possible.\n\n"
-            "Examples: 'show router interface', 'show port', 'show card state'"
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Device session name"},
-                "command": {"type": "string", "description": "MD-CLI command to execute"},
-            },
-            "required": ["name", "command"],
-        },
-    ),
-    Tool(
         name="sros_capabilities",
         description=(
             "Get gNMI capabilities from Nokia SR OS device. "
             "Returns supported encodings, YANG models, and gNMI version."
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {"name": {"type": "string", "description": "Device session name"}},
             "required": ["name"],
@@ -563,7 +542,7 @@ TOOLS = [
     Tool(
         name="sros_list_sessions",
         description="List all active Nokia SR OS gNMI sessions.",
-        inputSchema={"type": "object", "properties": {}},
+        input_schema={"type": "object", "properties": {}},
     ),
     Tool(
         name="yang_search",
@@ -578,7 +557,7 @@ TOOLS = [
             "  yang_search('neighbor', 'state')         → find BGP neighbor state paths\n\n"
             "Requires YANG models in yang/sros-25.10/YANG/ or pre-built cache in yang/cache/."
         ),
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "keyword": {
@@ -620,12 +599,7 @@ def handle_tool(tool_name: str, args: dict) -> str:
         pwd  = args["password"]
         timeout = args.get("timeout", 10)
         insecure = args.get("insecure", False)
-        skip_verify = args.get("skip_verify", True)
-
-        # Auto-fallback: if neither insecure nor explicit TLS cert provided,
-        # try skip_verify first; if SSL error → retry with insecure=True
-        # (Nokia srsim/containerlab uses plain gRPC without TLS)
-        tried_insecure = insecure
+        skip_verify = args.get("skip_verify", False)
 
         _sessions[name] = DeviceSession(
             host=host, port=port, username=user, password=pwd,
@@ -634,21 +608,9 @@ def handle_tool(tool_name: str, args: dict) -> str:
         try:
             gc = _connect(name)
             caps = gc.capabilities()
-        except Exception as e:
-            err_str = str(e).lower()
-            if not tried_insecure and ("ssl" in err_str or "certificate" in err_str or "tls" in err_str):
-                # Fallback to insecure (plain gRPC) — typical for srsim
-                logger.info(f"TLS failed for '{name}', retrying with insecure=True")
-                _close(name)
-                _sessions[name] = DeviceSession(
-                    host=host, port=port, username=user, password=pwd,
-                    skip_verify=False, insecure=True, timeout=timeout,
-                )
-                gc = _connect(name)
-                caps = gc.capabilities()
-                tried_insecure = True
-            else:
-                raise
+        except Exception:
+            _close(name)
+            raise
 
         model_count = len(caps.get("supported_models", []))
         encodings = caps.get("supported_encodings", [])
@@ -684,10 +646,6 @@ def handle_tool(tool_name: str, args: dict) -> str:
         gc = _connect(args["name"])
         return _do_set_delete(gc, args["paths"])
 
-    elif tool_name == "sros_cli_command":
-        gc = _connect(args["name"])
-        return _do_cli_command(gc, args["command"])
-
     elif tool_name == "sros_capabilities":
         gc = _connect(args["name"])
         return _do_capabilities(gc)
@@ -718,22 +676,27 @@ def handle_tool(tool_name: str, args: dict) -> str:
 # MCP Server entrypoint
 # ═══════════════════════════════════════════════
 
-app = Server("nokia-gnmi-mcp")
+async def list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
+    return ListToolsResult(tools=TOOLS)
 
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    return TOOLS
-
-
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
     try:
-        result = handle_tool(name, arguments)
+        tool = next((tool for tool in TOOLS if tool.name == params.name), None)
+        if tool is None:
+            raise ValueError(f"Unknown tool: {params.name}")
+        arguments = params.arguments or {}
+        validate(arguments, tool.input_schema)
+        result = handle_tool(params.name, arguments)
+    except ValidationError as e:
+        return CallToolResult(content=[TextContent(type="text", text=f"Invalid arguments: {e.message}")], is_error=True)
     except Exception as e:
-        logger.exception(f"Tool '{name}' failed")
-        result = f"✗ Error: {type(e).__name__}: {e}"
-    return [TextContent(type="text", text=result)]
+        logger.exception("Tool '%s' failed", params.name)
+        return CallToolResult(content=[TextContent(type="text", text=f"{type(e).__name__}: {e}")], is_error=True)
+    return CallToolResult(content=[TextContent(type="text", text=result)])
+
+
+app = Server("nokia-gnmi-mcp", version="2.0.0", on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 async def run():
